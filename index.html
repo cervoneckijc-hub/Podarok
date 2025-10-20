@@ -1,0 +1,1152 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Подарункова кімната — Бронюй подарунки разом!</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Google Fonts: Inter (Modern & Clean) -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap" rel="stylesheet">
+    <style>
+        /* Custom Styles & Animation Definitions */
+        :root {
+            --color-primary: #06B6D4; /* Cyan/Teal for accent */
+            --color-reserved: #F97316; /* Orange for reserved */
+            --color-bought: #10B981; /* Emerald for bought */
+            --color-bg: #F8F9FB; /* Light background */
+            font-family: 'Inter', sans-serif;
+        }
+
+        body {
+            background-color: var(--color-bg);
+            color: #1F2937; /* Dark text */
+            min-height: 100vh;
+        }
+
+        /* Minimalist Card Styling */
+        .gift-card {
+            transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+            cursor: pointer;
+            position: relative;
+        }
+
+        .gift-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        }
+
+        /* Pulsing animation for reserved/pending */
+        @keyframes pulse-reserved {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(249, 115, 22, 0.4); }
+            50% { box-shadow: 0 0 0 10px rgba(249, 115, 22, 0); }
+        }
+
+        .pulsing {
+            animation: pulse-reserved 2s infinite;
+        }
+
+        /* Modal backdrop transition */
+        .modal-enter-active, .modal-leave-active {
+            transition: opacity 0.3s;
+        }
+        .modal-enter-from, .modal-leave-to {
+            opacity: 0;
+        }
+        .modal-content-enter-active {
+            transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+        .modal-content-enter-from {
+            transform: scale(0.9);
+        }
+
+        /* Adaptive grid for gifts */
+        #gift-list {
+            display: grid;
+            gap: 1.5rem;
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+        }
+
+        @media (min-width: 640px) {
+            #gift-list {
+                grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            }
+        }
+        @media (min-width: 1024px) {
+            #gift-list {
+                grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            }
+        }
+    </style>
+</head>
+<body class="p-4 sm:p-8">
+
+    <!-- Main Application Container -->
+    <div id="app" class="max-w-4xl mx-auto">
+        <!-- Content will be rendered here by JavaScript -->
+        <div class="flex justify-center items-center h-[50vh] text-gray-500">
+            <svg class="animate-spin -ml-1 mr-3 h-5 w-5 text-teal-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            Завантаження...
+        </div>
+    </div>
+
+    <!-- Modal Placeholder -->
+    <div id="modal-container"></div>
+
+    <script type="module">
+        // --- Firebase Imports ---
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, updateDoc, onSnapshot, collection, query, where, addDoc, getDocs, runTransaction, arrayUnion, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Set log level for debugging
+        setLogLevel('debug');
+
+        // --- Global Variables (Provided by Canvas) ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // --- Application State ---
+        let db, auth;
+        let userId = null;
+        let userName = ''; // User's name entered on login/creation
+        let currentView = 'landing';
+        let currentRoomId = null;
+        let roomData = null; // Stores { ownerId, title, guestsCount, gifts }
+
+        // --- Constants ---
+        const PUBLIC_COLLECTION_PATH = `/artifacts/${appId}/public/data/rooms`;
+        const APP_NAME = 'Подарункова кімната';
+
+        // --- Utility Functions ---
+
+        /** Generates a unique, short ID (placeholder for a better ID gen) */
+        const generateRoomId = () => Math.random().toString(36).substring(2, 8).toUpperCase();
+
+        /** Gets the reference to a specific room document */
+        const getRoomRef = (roomId) => doc(db, PUBLIC_COLLECTION_PATH, roomId);
+
+        /** Gets URL parameters */
+        const getUrlParams = () => {
+            const params = new URLSearchParams(window.location.search);
+            return {
+                view: params.get('view'),
+                room: params.get('room'),
+                role: params.get('role'), // 'owner' or 'guest'
+            };
+        };
+
+        /** Updates the URL in the browser without reloading */
+        const updateUrl = (params) => {
+            const url = new URL(window.location.href);
+            Object.keys(params).forEach(key => {
+                if (params[key] !== null) {
+                    url.searchParams.set(key, params[key]);
+                } else {
+                    url.searchParams.delete(key);
+                }
+            });
+            window.history.pushState({}, '', url.toString());
+        };
+
+        /** Simple Toast Notification System (replaces alert()) */
+        const showToast = (message, type = 'success') => {
+            const toast = document.createElement('div');
+            let bgColor = 'bg-teal-500';
+            if (type === 'error') bgColor = 'bg-red-500';
+            if (type === 'warning') bgColor = 'bg-yellow-500';
+
+            toast.className = `fixed bottom-4 right-4 p-4 rounded-lg text-white shadow-xl transition-all duration-300 transform translate-y-0 opacity-100 ${bgColor}`;
+            toast.textContent = message;
+            document.body.appendChild(toast);
+
+            setTimeout(() => {
+                toast.classList.remove('translate-y-0', 'opacity-100');
+                toast.classList.add('translate-y-full', 'opacity-0');
+                toast.addEventListener('transitionend', () => toast.remove());
+            }, 3000);
+        };
+
+        // --- Authentication and Initialization ---
+
+        const initFirebase = async () => {
+            try {
+                if (Object.keys(firebaseConfig).length === 0) {
+                    console.error("Firebase config is empty. Cannot initialize.");
+                    return;
+                }
+
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                // Authenticate
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                // Wait for auth state to settle
+                return new Promise(resolve => {
+                    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+                        if (user) {
+                            userId = user.uid;
+                            // Pre-load default name if necessary
+                            userName = `Гість-${userId.substring(0, 4)}`;
+                            console.log("Firebase initialized. User ID:", userId);
+
+                            // Check for the "test" room and create it if it doesn't exist
+                            await ensureTestRoomExists();
+
+                            resolve();
+                        } else {
+                            // Should not happen with anonymous sign-in, but handle if it does
+                            console.error("Authentication failed.");
+                            resolve();
+                        }
+                        unsubscribe();
+                    });
+                });
+
+            } catch (error) {
+                console.error("Firebase initialization failed:", error);
+            }
+        };
+
+        /** Ensures the default 'test' room is available */
+        const ensureTestRoomExists = async () => {
+            const testRoomId = 'TEST';
+            const roomRef = getRoomRef(testRoomId);
+            const docSnap = await getDoc(roomRef);
+
+            if (!docSnap.exists()) {
+                console.log(`Creating default room: ${testRoomId}`);
+                const defaultGifts = [
+                    { id: 'g1', name: 'Книга «Атлант»', price: 850, status: 'AVAILABLE', icon: '📚', category: 'Книги', type: 'Фізичний', priority: 1, reservedBy: null, reservedName: null },
+                    { id: 'g2', name: 'Сертифікат в SPA', price: 2000, status: 'AVAILABLE', icon: '🧖‍♀️', category: 'Враження', type: 'Електронний', priority: 2, reservedBy: null, reservedName: null },
+                    { id: 'g3', name: 'Кавоварка', price: 4500, status: 'AVAILABLE', icon: '☕', category: 'Техніка', type: 'Фізичний', priority: 3, reservedBy: null, reservedName: null },
+                    { id: 'g4', name: 'Квитки на концерт', price: 1500, status: 'AVAILABLE', icon: '🎶', category: 'Враження', type: 'Електронний', priority: 4, reservedBy: null, reservedName: null },
+                    { id: 'g5', name: 'Теплий плед', price: 1200, status: 'AVAILABLE', icon: '🧸', category: 'Дім', type: 'Фізичний', priority: 5, reservedBy: null, reservedName: null },
+                ];
+
+                await setDoc(roomRef, {
+                    ownerId: 'default-owner', // This is a system-controlled ID
+                    title: 'День народження (Тест)',
+                    description: 'Тестова кімната на 5 гостей. Спробуйте забронювати подарунок!',
+                    guestsCount: 5,
+                    createdAt: serverTimestamp(),
+                    gifts: defaultGifts,
+                    hideReserved: false // Default setting
+                });
+                console.log(`Default room ${testRoomId} created.`);
+            }
+        };
+
+        // --- Core Application Logic / Routing ---
+
+        /** Changes the current application view */
+        const navigate = (view, params = {}) => {
+            currentView = view;
+            if (params.roomId) currentRoomId = params.roomId;
+            if (params.role) params.role = params.role; // Keep role if set
+
+            // Update URL for navigability
+            updateUrl({ view, room: currentRoomId, role: params.role || null });
+
+            renderApp();
+        };
+
+        const handleInitialRoute = () => {
+            const params = getUrlParams();
+            if (params.room) {
+                currentRoomId = params.room;
+                // Determine if owner or guest needs to be logged in
+                if (params.role === 'owner') {
+                    navigate('roomLink', { roomId: params.room, role: 'owner' });
+                } else {
+                    navigate('guestLogin', { roomId: params.room });
+                }
+            } else {
+                navigate('landing');
+            }
+        };
+
+        // --- Firestore Interaction / Realtime Listener ---
+
+        let unsubscribeRoomListener = null;
+
+        const startRoomListener = (roomId) => {
+            if (unsubscribeRoomListener) {
+                unsubscribeRoomListener();
+            }
+
+            const roomRef = getRoomRef(roomId);
+            unsubscribeRoomListener = onSnapshot(roomRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    roomData = docSnap.data();
+                    renderApp(); // Re-render the view when data changes
+                } else {
+                    showToast(`Кімната з кодом ${roomId} не знайдена.`, 'error');
+                    navigate('landing');
+                }
+            }, (error) => {
+                console.error("Error listening to room:", error);
+                showToast("Помилка підключення до кімнати.", 'error');
+                navigate('landing');
+            });
+        };
+
+        // --- Transactional Updates ---
+
+        const handleReserveGift = async (giftId) => {
+            if (!currentRoomId || !userId || !userName) {
+                showToast("Помилка: Немає даних кімнати або користувача.", 'error');
+                return;
+            }
+
+            try {
+                const roomRef = getRoomRef(currentRoomId);
+
+                await runTransaction(db, async (transaction) => {
+                    const docSnap = await transaction.get(roomRef);
+                    if (!docSnap.exists()) {
+                        throw "Кімната не існує!";
+                    }
+
+                    const room = docSnap.data();
+                    const gifts = room.gifts || [];
+                    const giftIndex = gifts.findIndex(g => g.id === giftId);
+
+                    if (giftIndex === -1) {
+                        throw "Подарунок не знайдено.";
+                    }
+
+                    const gift = gifts[giftIndex];
+
+                    if (gift.status !== 'AVAILABLE') {
+                        // Check if current user is trying to reserve an already reserved gift
+                        if (gift.status === 'RESERVED' && gift.reservedBy === userId) {
+                            // If user is already the one reserving, treat it as a success/no change
+                            return;
+                        }
+                        throw "Цей подарунок вже заброньовано або куплено.";
+                    }
+
+                    // Perform the reservation
+                    gifts[giftIndex] = {
+                        ...gift,
+                        status: 'RESERVED',
+                        reservedBy: userId,
+                        reservedName: userName,
+                        reservationTime: serverTimestamp()
+                    };
+
+                    transaction.update(roomRef, { gifts: gifts });
+                    showToast(`Ви забронювали: ${gift.name}`, 'success');
+                });
+
+            } catch (e) {
+                console.error("Reservation failed:", e);
+                showToast(`Помилка бронювання: ${e}`, 'error');
+            }
+        };
+
+        const handleCancelReservation = async (giftId) => {
+            if (!currentRoomId || !userId) return;
+            const roomRef = getRoomRef(currentRoomId);
+
+            try {
+                await runTransaction(db, async (transaction) => {
+                    const docSnap = await transaction.get(roomRef);
+                    const room = docSnap.data();
+                    const gifts = room.gifts || [];
+                    const giftIndex = gifts.findIndex(g => g.id === giftId);
+                    const gift = gifts[giftIndex];
+
+                    if (gift.status === 'RESERVED' && gift.reservedBy === userId) {
+                        gifts[giftIndex] = {
+                            ...gift,
+                            status: 'AVAILABLE',
+                            reservedBy: null,
+                            reservedName: null,
+                            reservationTime: null
+                        };
+                        transaction.update(roomRef, { gifts: gifts });
+                        showToast(`Бронь на ${gift.name} скасовано.`, 'warning');
+                    } else {
+                        throw "Неможливо скасувати бронь. Ви не є власником броні.";
+                    }
+                });
+            } catch (e) {
+                console.error("Cancel reservation failed:", e);
+                showToast(`Помилка скасування: ${e}`, 'error');
+            }
+        };
+
+        const handleConfirmBought = async (giftId) => {
+            if (!currentRoomId || !userId) return;
+            const roomRef = getRoomRef(currentRoomId);
+
+            try {
+                await runTransaction(db, async (transaction) => {
+                    const docSnap = await transaction.get(roomRef);
+                    const room = docSnap.data();
+                    const gifts = room.gifts || [];
+                    const giftIndex = gifts.findIndex(g => g.id === giftId);
+                    const gift = gifts[giftIndex];
+
+                    // Check if reserved by user or user is owner
+                    if (gift.reservedBy === userId || room.ownerId === userId) {
+                        gifts[giftIndex] = {
+                            ...gift,
+                            status: 'BOUGHT',
+                            boughtBy: userId,
+                            boughtName: userName || gift.reservedName,
+                            boughtTime: serverTimestamp()
+                        };
+                        transaction.update(roomRef, { gifts: gifts });
+                        showToast(`Подарунок ${gift.name} позначено як КУПЛЕНО!`, 'success');
+                    } else {
+                        throw "Тільки власник кімнати або той, хто забронював, може підтвердити покупку.";
+                    }
+                });
+            } catch (e) {
+                console.error("Confirm bought failed:", e);
+                showToast(`Помилка підтвердження покупки: ${e}`, 'error');
+            }
+        };
+
+        // --- UI Rendering Components ---
+
+        /** Renders the Logo and main application header */
+        const renderHeader = (title) => `
+            <header class="mb-8 py-4 border-b border-gray-200">
+                <div class="flex justify-between items-center">
+                    <a href="#" onclick="window.app.navigate('landing')" class="flex items-center space-x-2 text-xl font-extrabold text-gray-800 transition duration-150 ease-in-out hover:text-teal-600">
+                        <span class="p-2 bg-teal-200 text-teal-600 rounded-full">🎁</span>
+                        <span>${APP_NAME}</span>
+                    </a>
+                    <h2 class="text-xl font-semibold text-gray-700">${title}</h2>
+                </div>
+            </header>
+        `;
+
+        // --- 1. Landing View ---
+        const renderLanding = () => {
+            return `
+                ${renderHeader('Головна')}
+                <main class="text-center p-6 bg-white rounded-xl shadow-lg">
+                    <h1 class="text-3xl font-bold mb-4 text-gray-800">Бронюйте подарунки разом!</h1>
+                    <p class="text-gray-600 mb-8 max-w-md mx-auto">
+                        Простий сервіс, де власник створює список бажаних подарунків, а гості обирають, бронюють та купують їх без дублювання.
+                    </p>
+
+                    <div class="flex flex-col sm:flex-row justify-center space-y-4 sm:space-y-0 sm:space-x-4 mb-8">
+                        <button onclick="window.app.navigate('createRoom')"
+                                class="w-full sm:w-auto px-6 py-3 bg-teal-600 text-white font-semibold rounded-xl shadow-md hover:bg-teal-700 transition duration-150">
+                            Створити кімнату (Власник)
+                        </button>
+                        <button onclick="document.getElementById('join-section').classList.toggle('hidden')"
+                                class="w-full sm:w-auto px-6 py-3 bg-gray-200 text-gray-700 font-semibold rounded-xl hover:bg-gray-300 transition duration-150">
+                            Увійти в кімнату (Гість)
+                        </button>
+                    </div>
+
+                    <div id="join-section" class="hidden mt-6 p-4 border border-gray-200 rounded-xl bg-gray-50 max-w-sm mx-auto transition duration-300">
+                        <h3 class="text-lg font-medium mb-3">Вхід за кодом</h3>
+                        <input type="text" id="room-code-input" placeholder="Введіть код кімнати (наприклад, TEST)"
+                            class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 mb-3 uppercase text-center text-lg font-bold">
+                        <button onclick="window.app.handleJoinRoom()"
+                                class="w-full px-4 py-2 bg-teal-600 text-white font-medium rounded-lg hover:bg-teal-700 transition duration-150">
+                            Увійти
+                        </button>
+                    </div>
+                </main>
+                <footer class="mt-12 text-center text-gray-500 text-sm">
+                    &copy; 2024 ${APP_NAME}. Усі права захищені.
+                </footer>
+            `;
+        };
+
+        window.app.handleJoinRoom = () => {
+            const code = document.getElementById('room-code-input').value.trim().toUpperCase();
+            if (code) {
+                navigate('guestLogin', { roomId: code });
+            } else {
+                showToast("Будь ласка, введіть код кімнати.", 'warning');
+            }
+        };
+
+        // --- 2. Create Room / Add Gifts View ---
+        const renderCreateRoom = () => {
+            if (currentView === 'createRoom') {
+                // Initial room creation form
+                return `
+                    ${renderHeader('Створення нової кімнати')}
+                    <main class="bg-white p-6 sm:p-8 rounded-xl shadow-lg">
+                        <h3 class="text-2xl font-bold mb-6 text-gray-800">Основні деталі</h3>
+                        <div class="space-y-4">
+                            <div>
+                                <label for="owner-name" class="block text-sm font-medium text-gray-700">Ваше ім'я (Власник)</label>
+                                <input type="text" id="owner-name" value="${userName || ''}" placeholder="Наприклад, Ірина"
+                                       class="mt-1 block w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500">
+                            </div>
+                            <div>
+                                <label for="event-title" class="block text-sm font-medium text-gray-700">Назва події/свята (Обов'язково)</label>
+                                <input type="text" id="event-title" placeholder="Наприклад, День народження Іри"
+                                       class="mt-1 block w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500">
+                            </div>
+                            <div>
+                                <label for="guests-count" class="block text-sm font-medium text-gray-700">Кількість гостей (N)</label>
+                                <input type="number" id="guests-count" min="1" value="5"
+                                       class="mt-1 block w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500">
+                            </div>
+                            <div>
+                                <label for="event-date" class="block text-sm font-medium text-gray-700">Дата події (Опціонально)</label>
+                                <input type="date" id="event-date"
+                                       class="mt-1 block w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500">
+                            </div>
+                        </div>
+
+                        <button onclick="window.app.startAddingGifts()"
+                                class="mt-8 w-full px-6 py-3 bg-teal-600 text-white font-semibold rounded-xl shadow-md hover:bg-teal-700 transition duration-150">
+                            Далі: Додати подарунки
+                        </button>
+                    </main>
+                `;
+            } else if (currentView === 'addGifts') {
+                return renderAddGiftsForm();
+            }
+        };
+
+        let draftRoom = { ownerName: '', title: '', guestsCount: 5, gifts: [] };
+
+        window.app.startAddingGifts = () => {
+            const ownerNameInput = document.getElementById('owner-name').value.trim();
+            const titleInput = document.getElementById('event-title').value.trim();
+            const countInput = parseInt(document.getElementById('guests-count').value);
+
+            if (!titleInput || isNaN(countInput) || countInput < 1) {
+                showToast("Будь ласка, введіть назву події та дійсну кількість гостей (N > 0).", 'warning');
+                return;
+            }
+
+            draftRoom.ownerName = ownerNameInput || `Власник-${userId.substring(0, 4)}`;
+            draftRoom.title = titleInput;
+            draftRoom.guestsCount = countInput;
+
+            // Initialize gift slots if they haven't been created yet
+            if (draftRoom.gifts.length !== countInput) {
+                const newGifts = [];
+                for (let i = 0; i < countInput; i++) {
+                    newGifts.push({
+                        id: `g${i + 1}`,
+                        name: '',
+                        price: 0,
+                        description: '',
+                        link: '',
+                        icon: '❓',
+                        category: 'Різне',
+                        type: 'Фізичний',
+                        priority: i + 1,
+                        status: 'AVAILABLE',
+                        reservedBy: null,
+                        reservedName: null,
+                    });
+                }
+                draftRoom.gifts = newGifts;
+            }
+
+            navigate('addGifts');
+        };
+
+        const GIFT_ICONS = ['🎁', '📚', '☕', '💻', '🧘', '🎧', '💸', '🖼️', '🧸', '🍷'];
+
+        const renderAddGiftsForm = () => {
+            const giftForms = draftRoom.gifts.map((gift, index) => `
+                <div class="gift-slot p-5 border border-gray-200 rounded-xl bg-gray-50 transition duration-300 hover:shadow-md" data-index="${index}">
+                    <h4 class="text-xl font-semibold mb-3 text-teal-600">Подарунок #${index + 1}</h4>
+                    <div class="space-y-3">
+                        <div class="flex items-center space-x-3">
+                            <input type="text" value="${gift.icon}" maxlength="2" data-field="icon" placeholder="Іконка (смайлик)"
+                                   class="w-12 h-12 text-2xl text-center border-2 border-teal-300 rounded-full focus:outline-none"
+                                   oninput="window.app.updateDraftGift(${index}, 'icon', this.value)">
+                            <select onchange="window.app.updateDraftGift(${index}, 'icon', this.value)" class="p-2 border border-gray-300 rounded-lg text-sm">
+                                <option value="${gift.icon}">${gift.icon} (поточний)</option>
+                                ${GIFT_ICONS.map(i => `<option value="${i}">${i}</option>`).join('')}
+                            </select>
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-medium text-gray-500">Назва подарунка*</label>
+                            <input type="text" value="${gift.name}" data-field="name" placeholder="Наприклад, Навушники Sony WH-1000XM5"
+                                   class="mt-1 block w-full p-2 border border-gray-300 rounded-lg"
+                                   oninput="window.app.updateDraftGift(${index}, 'name', this.value)">
+                        </div>
+
+                        <div class="flex space-x-3">
+                            <div class="w-1/2">
+                                <label class="block text-xs font-medium text-gray-500">Ціна (оціночна, грн)*</label>
+                                <input type="number" value="${gift.price || ''}" data-field="price" min="0" placeholder="1500"
+                                       class="mt-1 block w-full p-2 border border-gray-300 rounded-lg"
+                                       oninput="window.app.updateDraftGift(${index}, 'price', parseFloat(this.value))">
+                            </div>
+                            <div class="w-1/2">
+                                <label class="block text-xs font-medium text-gray-500">Категорія</label>
+                                <input type="text" value="${gift.category}" data-field="category" placeholder="Техніка"
+                                       class="mt-1 block w-full p-2 border border-gray-300 rounded-lg"
+                                       oninput="window.app.updateDraftGift(${index}, 'category', this.value)">
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-medium text-gray-500">Посилання на магазин (Опціонально)</label>
+                            <input type="url" value="${gift.link}" data-field="link" placeholder="https://..."
+                                   class="mt-1 block w-full p-2 border border-gray-300 rounded-lg"
+                                   oninput="window.app.updateDraftGift(${index}, 'link', this.value)">
+                        </div>
+
+                        <div>
+                            <label class="inline-flex items-center">
+                                <input type="checkbox" data-field="type" ${gift.type === 'Електронний' ? 'checked' : ''}
+                                       onchange="window.app.updateDraftGift(${index}, 'type', this.checked ? 'Електронний' : 'Фізичний')"
+                                       class="rounded text-teal-600 focus:ring-teal-500">
+                                <span class="ml-2 text-sm text-gray-700">Електронний подарунок (сертифікат/підписка)</span>
+                            </label>
+                        </div>
+
+                    </div>
+                </div>
+            `).join('');
+
+            return `
+                ${renderHeader(`Додавання ${draftRoom.gifts.length} подарунків для кімнати "${draftRoom.title}"`)}
+                <main class="pb-24">
+                    <div class="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+                        ${giftForms}
+                    </div>
+                </main>
+                <div class="fixed bottom-0 left-0 right-0 p-4 bg-white border-t border-gray-200 shadow-2xl">
+                    <button onclick="window.app.finalizeRoomCreation()"
+                            class="w-full px-6 py-3 bg-rose-600 text-white font-semibold rounded-xl shadow-md hover:bg-rose-700 transition duration-150">
+                        Зберегти та створити кімнату
+                    </button>
+                </div>
+            `;
+        };
+
+        window.app.updateDraftGift = (index, field, value) => {
+            if (draftRoom.gifts[index]) {
+                draftRoom.gifts[index][field] = value;
+            }
+        };
+
+        window.app.finalizeRoomCreation = async () => {
+            const requiredFields = ['name', 'price'];
+            let isValid = true;
+
+            for (const gift of draftRoom.gifts) {
+                if (!gift.name || gift.price <= 0 || isNaN(gift.price)) {
+                    isValid = false;
+                    break;
+                }
+            }
+
+            if (!isValid) {
+                showToast("Будь ласка, заповніть Назву та дійсну Ціну (більше 0) для ВСІХ подарунків.", 'error');
+                return;
+            }
+
+            try {
+                const newRoomId = generateRoomId();
+                const roomRef = getRoomRef(newRoomId);
+
+                await setDoc(roomRef, {
+                    ownerId: userId,
+                    ownerName: draftRoom.ownerName,
+                    title: draftRoom.title,
+                    guestsCount: draftRoom.guestsCount,
+                    createdAt: serverTimestamp(),
+                    gifts: draftRoom.gifts,
+                    hideReserved: false, // Default setting: show reserved items
+                });
+
+                showToast(`Кімната "${draftRoom.title}" успішно створена!`, 'success');
+                navigate('roomLink', { roomId: newRoomId, role: 'owner' });
+
+            } catch (e) {
+                console.error("Room creation failed:", e);
+                showToast("Помилка при створенні кімнати. Спробуйте ще раз.", 'error');
+            }
+        };
+
+        // --- 3. Room Link View (Owner) ---
+        const renderRoomLink = () => {
+            if (!roomData) return `<div class="p-8 text-center">Завантаження...</div>`;
+
+            const roomLink = `${window.location.origin}${window.location.pathname}?room=${currentRoomId}`;
+            const isOwner = roomData.ownerId === userId;
+
+            // Owner sees this link page, Guest is redirected to room view
+            if (!isOwner) {
+                 return renderRoomView();
+            }
+
+            return `
+                ${renderHeader('Кімната створена!')}
+                <main class="bg-white p-6 sm:p-8 rounded-xl shadow-lg text-center">
+                    <div class="text-6xl mb-6">🎉</div>
+                    <h1 class="text-3xl font-bold mb-2 text-gray-800">${roomData.title}</h1>
+                    <p class="text-xl text-teal-600 font-medium mb-6">Код кімнати: <span class="p-2 bg-teal-100 rounded-lg">${currentRoomId}</span></p>
+
+                    <div class="mb-8">
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Посилання для гостей</label>
+                        <input type="text" value="${roomLink}" readonly id="room-link-input"
+                               class="w-full p-3 border border-gray-300 rounded-lg text-center font-mono text-sm bg-gray-50 mb-3">
+                        <button onclick="window.app.copyLink('${roomLink}')"
+                                class="px-6 py-2 bg-teal-600 text-white font-semibold rounded-lg hover:bg-teal-700 transition duration-150">
+                            Копіювати посилання
+                        </button>
+                    </div>
+
+                    <p class="text-gray-600 mb-6">Тепер ви можете перейти до перегляду кімнати як **Власник**.</p>
+
+                    <button onclick="window.app.viewRoomAsOwner()"
+                            class="w-full sm:w-1/2 px-6 py-3 bg-rose-600 text-white font-semibold rounded-xl hover:bg-rose-700 transition duration-150">
+                        Перейти до кімнати
+                    </button>
+                </main>
+            `;
+        };
+
+        window.app.copyLink = (link) => {
+            navigator.clipboard.writeText(link).then(() => {
+                showToast("Посилання успішно скопійовано!", 'success');
+            }).catch(err => {
+                console.error('Copy failed:', err);
+                showToast("Помилка копіювання. Спробуйте вручну.", 'error');
+            });
+        };
+
+        window.app.viewRoomAsOwner = () => {
+             // We use a different URL param for the owner to facilitate role switching logic
+            updateUrl({ view: 'room', room: currentRoomId, role: 'owner' });
+            navigate('roomView');
+        };
+
+        // --- 4. Guest Login View ---
+        const renderGuestLogin = () => {
+            return `
+                ${renderHeader('Вхід у кімнату')}
+                <main class="text-center p-6 bg-white rounded-xl shadow-lg max-w-sm mx-auto">
+                    <div class="text-5xl mb-4">🚪</div>
+                    <h1 class="text-2xl font-bold mb-4 text-gray-800">Ви заходите у кімнату: <span class="text-teal-600">${currentRoomId}</span></h1>
+                    <p class="text-gray-600 mb-6">Введіть своє ім'я або нікнейм, щоб інші гості знали, хто бронює подарунок.</p>
+
+                    <input type="text" id="guest-name-input" placeholder="Ваше ім'я (Опціонально)" value="${userName.startsWith('Гість') ? '' : userName}"
+                        class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 mb-4">
+
+                    <button onclick="window.app.loginAsGuest()"
+                            class="w-full px-6 py-3 bg-teal-600 text-white font-semibold rounded-xl hover:bg-teal-700 transition duration-150">
+                        Увійти до кімнати
+                    </button>
+                </main>
+            `;
+        };
+
+        window.app.loginAsGuest = () => {
+            const name = document.getElementById('guest-name-input').value.trim();
+            userName = name || `Анонімний гість`;
+            showToast(`Ласкаво просимо, ${userName}!`, 'success');
+            navigate('roomView', { role: 'guest' });
+        };
+
+
+        // --- 5. Main Room View (Guest/Owner) ---
+
+        /** Renders a single Gift Card component */
+        const renderGiftCard = (gift) => {
+            const statusClass = {
+                'AVAILABLE': 'bg-teal-500 text-white',
+                'RESERVED': 'bg-orange-500 text-white pulsing',
+                'BOUGHT': 'bg-emerald-600 text-white',
+            }[gift.status] || 'bg-gray-400 text-white';
+
+            const isReservedByMe = gift.status === 'RESERVED' && gift.reservedBy === userId;
+            const isBought = gift.status === 'BOUGHT';
+            const isOwner = roomData?.ownerId === userId;
+            const isGuest = !isOwner;
+
+            let actionButton = '';
+            let statusText = '';
+            let cardClasses = 'gift-card bg-white p-4 rounded-3xl shadow-xl flex flex-col items-center text-center relative';
+
+            if (isBought) {
+                statusText = `КУПЛЕНО: ${gift.boughtName || 'Анонімно'}`;
+                cardClasses = 'gift-card bg-emerald-50 p-4 rounded-3xl shadow-xl flex flex-col items-center text-center relative opacity-70';
+            } else if (isReservedByMe) {
+                statusText = `ЗАБРОНЬОВАНО ВАМИ`;
+                actionButton = `
+                    <button onclick="window.app.openConfirmBoughtModal('${gift.id}')" class="w-full mt-3 px-4 py-2 text-white font-bold rounded-lg bg-emerald-600 hover:bg-emerald-700 transition duration-150">
+                        Підтвердити купівлю
+                    </button>
+                    <button onclick="window.app.openCancelReservationModal('${gift.id}')" class="w-full mt-2 px-4 py-2 text-gray-700 font-medium rounded-lg bg-gray-200 hover:bg-gray-300 transition duration-150">
+                        Скасувати бронь
+                    </button>
+                `;
+            } else if (gift.status === 'RESERVED') {
+                statusText = `ЗАБРОНЬОВАНО: ${gift.reservedName || 'Анонімно'}`;
+                // Guests don't see action button if reserved by others
+            } else { // AVAILABLE
+                statusText = 'ВІЛЬНО';
+                actionButton = `
+                    <button onclick="window.app.openReserveModal('${gift.id}')" class="w-full mt-3 px-4 py-2 text-white font-bold rounded-lg bg-teal-600 hover:bg-teal-700 transition duration-150">
+                        Забронювати
+                    </button>
+                `;
+            }
+
+            // Owner can confirm bought for any reserved gift
+            if (isOwner && gift.status === 'RESERVED' && !isReservedByMe) {
+                 actionButton += `
+                    <button onclick="window.app.openConfirmBoughtModal('${gift.id}')" class="w-full mt-3 px-4 py-2 text-white font-bold rounded-lg bg-emerald-600 hover:bg-emerald-700 transition duration-150">
+                        Підтв. купівлю (Owner)
+                    </button>
+                `;
+            }
+            if (isOwner && gift.status === 'RESERVED') {
+                actionButton += `
+                    <button onclick="window.app.openCancelReservationModal('${gift.id}')" class="w-full mt-2 px-4 py-2 text-gray-700 font-medium rounded-lg bg-gray-200 hover:bg-gray-300 transition duration-150">
+                        Скасувати бронь (Owner)
+                    </button>
+                `;
+            }
+
+            // Decide if the guest should see this card at all
+            if (isGuest && gift.status === 'RESERVED' && roomData.hideReserved && !isReservedByMe) {
+                return ''; // Hide reserved from non-reserving guests if setting is on
+            }
+
+            return `
+                <div class="${cardClasses}">
+                    <!-- Status Badge -->
+                    <div class="absolute top-0 right-0 p-1 rounded-bl-xl rounded-tr-3xl text-xs font-semibold ${statusClass}">
+                        ${statusText}
+                    </div>
+
+                    <!-- Icon/Avatar -->
+                    <div class="w-24 h-24 sm:w-28 sm:h-28 flex items-center justify-center rounded-full text-5xl sm:text-6xl bg-gray-100 mb-4 border-4 border-gray-100 shadow-inner">
+                        ${gift.icon}
+                    </div>
+
+                    <!-- Name & Price -->
+                    <h3 class="text-lg font-bold text-gray-800 line-clamp-2">${gift.name}</h3>
+                    <p class="text-sm font-medium text-gray-500 mb-3">≈ ${gift.price} грн</p>
+
+                    <!-- Details Overlay (Optional, for hover/click) -->
+                    <div class="w-full text-sm text-left border-t border-gray-100 pt-3 space-y-1">
+                         ${gift.link ? `<a href="${gift.link}" target="_blank" class="block text-teal-600 hover:underline">🔗 Магазин</a>` : ''}
+                         <p class="text-xs text-gray-500">Категорія: ${gift.category}</p>
+                         <p class="text-xs text-gray-500">Тип: ${gift.type}</p>
+                    </div>
+
+                    ${isGuest ? actionButton : ''}
+                    ${isOwner ? `<p class="mt-2 text-xs text-rose-500">Власник: ${gift.description || 'Без опису'}</p>` : ''}
+                </div>
+            `;
+        };
+
+        const renderRoomView = () => {
+            if (!roomData) return `<div class="p-8 text-center">Завантаження даних кімнати...</div>`;
+
+            const isOwner = roomData.ownerId === userId;
+            const roleText = isOwner ? 'Власник' : 'Гість';
+            const isGuest = !isOwner;
+            const myReservedGifts = roomData.gifts.filter(g => g.reservedBy === userId && g.status === 'RESERVED');
+            const otherReservedGifts = roomData.gifts.filter(g => g.reservedBy !== userId && g.status === 'RESERVED');
+            const availableGifts = roomData.gifts.filter(g => g.status === 'AVAILABLE');
+            const boughtGifts = roomData.gifts.filter(g => g.status === 'BOUGHT');
+
+            // Owner/Guest Switcher
+            const roleSwitcher = `
+                <div class="flex justify-end mb-4 text-sm text-gray-500">
+                    <span class="mr-2">Роль: ${roleText} (${isOwner ? roomData.ownerName : userName})</span>
+                    ${isGuest ? `
+                         <a href="#" onclick="window.app.navigate('roomLink', { roomId: currentRoomId, role: 'owner' })" class="text-teal-600 hover:underline">
+                            (Перейти до Власника)
+                        </a>
+                    ` : `
+                        <a href="#" onclick="window.app.navigate('guestLogin', { roomId: currentRoomId, role: 'guest' })" class="text-teal-600 hover:underline">
+                            (Перейти до Гостя)
+                        </a>
+                    `}
+                </div>
+            `;
+
+            return `
+                ${renderHeader(roomData.title)}
+                <main class="pb-24">
+                    ${roleSwitcher}
+
+                    <div class="mb-8 p-4 bg-teal-50 border-l-4 border-teal-600 rounded-lg text-teal-800">
+                        <p class="font-semibold">${roomData.description || 'Бажані подарунки від Власника.'}</p>
+                        <p class="text-sm mt-1">Всього гостей: ${roomData.guestsCount}. Створено ${roomData.ownerName}.</p>
+                    </div>
+
+                    <!-- My Reserved Section (Sticky/Prominent for Guest) -->
+                    ${myReservedGifts.length > 0 && isGuest ? `
+                        <h2 class="text-xl font-bold mt-8 mb-4">✅ Мої броні</h2>
+                        <div class="grid gap-6 sm:grid-cols-2 lg:grid-cols-3 mb-8" id="my-reserved-list">
+                            ${myReservedGifts.map(renderGiftCard).join('')}
+                        </div>
+                    ` : ''}
+
+                    <!-- Available Gifts -->
+                    <h2 class="text-xl font-bold mt-8 mb-4">🎁 Доступні подарунки (${availableGifts.length})</h2>
+                    <div id="gift-list" class="mb-8">
+                        ${availableGifts.map(renderGiftCard).join('')}
+                    </div>
+                    ${availableGifts.length === 0 ? `<p class="text-gray-500 text-center p-4 bg-white rounded-xl">Наразі всі подарунки заброньовані або куплені. 😉</p>` : ''}
+
+
+                    <!-- Other Reserved Gifts -->
+                    ${otherReservedGifts.length > 0 && (!roomData.hideReserved || isOwner) ? `
+                        <h2 class="text-xl font-bold mt-8 mb-4 text-orange-600">⏳ Заброньовані іншими (${otherReservedGifts.length})</h2>
+                        <div class="grid gap-6 sm:grid-cols-2 lg:grid-cols-3 opacity-60">
+                            ${otherReservedGifts.map(renderGiftCard).join('')}
+                        </div>
+                    ` : (isGuest && roomData.hideReserved ? `<p class="text-gray-500 text-center p-4 bg-white rounded-xl">Заброньовані подарунки приховані Власником.</p>` : '')}
+
+                    <!-- Bought Gifts -->
+                    ${boughtGifts.length > 0 ? `
+                        <h2 class="text-xl font-bold mt-8 mb-4 text-emerald-600">🎉 Куплені подарунки (${boughtGifts.length})</h2>
+                        <div class="grid gap-6 sm:grid-cols-2 lg:grid-cols-3 opacity-70">
+                            ${boughtGifts.map(renderGiftCard).join('')}
+                        </div>
+                    ` : ''}
+
+                </main>
+                <!-- Sticky Mobile Footer (if Guest) -->
+                ${isGuest ? `
+                    <div class="fixed bottom-0 left-0 right-0 p-3 bg-white border-t border-gray-200 shadow-2xl sm:hidden">
+                        <div class="flex justify-around">
+                            <button onclick="window.scrollTo(0, 0)" class="flex flex-col items-center text-xs text-teal-600">
+                                <span class="text-lg">🏠</span> Головна
+                            </button>
+                            <button onclick="document.getElementById('my-reserved-list') ? document.getElementById('my-reserved-list').scrollIntoView({ behavior: 'smooth' }) : showToast('У вас немає активних броней', 'warning')"
+                                    class="flex flex-col items-center text-xs text-orange-600">
+                                <span class="text-lg">🛒</span> Мої броні (${myReservedGifts.length})
+                            </button>
+                        </div>
+                    </div>
+                ` : ''}
+            `;
+        };
+
+        // --- Modals (Confirmation/Action Popups) ---
+
+        let currentModalGift = null;
+
+        const openModal = (title, content, actions, gift) => {
+            currentModalGift = gift;
+            const modalContainer = document.getElementById('modal-container');
+            modalContainer.innerHTML = `
+                <div id="action-modal" class="fixed inset-0 bg-gray-900 bg-opacity-50 flex items-center justify-center p-4 z-50 modal-enter-active">
+                    <div class="bg-white p-6 rounded-xl shadow-2xl max-w-sm w-full modal-content-enter-active">
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 class="text-xl font-bold">${title}</h3>
+                            <button onclick="window.app.closeModal()" class="text-gray-400 hover:text-gray-600">
+                                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                            </button>
+                        </div>
+                        <div>
+                            ${content}
+                        </div>
+                        <div class="mt-6 space-y-3">
+                            ${actions}
+                        </div>
+                    </div>
+                </div>
+            `;
+            // Trigger animation
+            setTimeout(() => {
+                const modal = document.getElementById('action-modal');
+                modal.classList.add('modal-enter-to');
+            }, 10);
+        };
+
+        window.app.closeModal = () => {
+            const modal = document.getElementById('action-modal');
+            if (modal) {
+                modal.classList.remove('modal-enter-active');
+                modal.classList.add('modal-leave-active');
+                modal.addEventListener('transitionend', () => modal.remove());
+            }
+            currentModalGift = null;
+        };
+
+        window.app.openReserveModal = (giftId) => {
+            const gift = roomData.gifts.find(g => g.id === giftId);
+            if (!gift) return;
+
+            const content = `
+                <p class="mb-4 text-gray-700">Ви дійсно хочете забронювати подарунок:</p>
+                <p class="text-lg font-bold text-teal-600">${gift.icon} ${gift.name} (≈ ${gift.price} грн)?</p>
+                <div class="mt-4 p-3 bg-gray-100 rounded-lg">
+                    <p class="text-sm font-medium text-gray-600">Ваше ім'я для броні: ${userName}</p>
+                </div>
+            `;
+            const actions = `
+                <button onclick="window.app.confirmReserve()" class="w-full px-4 py-3 bg-teal-600 text-white font-bold rounded-lg hover:bg-teal-700 transition duration-150">
+                    Підтвердити бронювання
+                </button>
+                <button onclick="window.app.closeModal()" class="w-full px-4 py-3 bg-gray-200 text-gray-700 font-medium rounded-lg hover:bg-gray-300 transition duration-150">
+                    Скасувати
+                </button>
+            `;
+            openModal('Бронювання подарунка', content, actions, gift);
+        };
+
+        window.app.confirmReserve = async () => {
+            if (!currentModalGift) return;
+            await handleReserveGift(currentModalGift.id);
+            window.app.closeModal();
+        };
+
+        window.app.openCancelReservationModal = (giftId) => {
+            const gift = roomData.gifts.find(g => g.id === giftId);
+            if (!gift) return;
+
+            const content = `
+                <p class="mb-4 text-gray-700">Ви скасовуєте бронь на подарунок:</p>
+                <p class="text-lg font-bold text-orange-600">${gift.icon} ${gift.name} (≈ ${gift.price} грн)</p>
+                <p class="text-sm mt-2">Подарунок знову стане доступним для інших гостей.</p>
+            `;
+            const actions = `
+                <button onclick="window.app.confirmCancelReservation()" class="w-full px-4 py-3 bg-orange-600 text-white font-bold rounded-lg hover:bg-orange-700 transition duration-150">
+                    Підтвердити скасування броні
+                </button>
+                <button onclick="window.app.closeModal()" class="w-full px-4 py-3 bg-gray-200 text-gray-700 font-medium rounded-lg hover:bg-gray-300 transition duration-150">
+                    Залишити бронь
+                </button>
+            `;
+            openModal('Скасування броні', content, actions, gift);
+        };
+
+        window.app.confirmCancelReservation = async () => {
+            if (!currentModalGift) return;
+            await handleCancelReservation(currentModalGift.id);
+            window.app.closeModal();
+        };
+
+        window.app.openConfirmBoughtModal = (giftId) => {
+            const gift = roomData.gifts.find(g => g.id === giftId);
+            if (!gift) return;
+
+            const content = `
+                <p class="mb-4 text-gray-700">Ви підтверджуєте, що подарунок вже куплено:</p>
+                <p class="text-xl font-bold text-emerald-600">${gift.icon} ${gift.name}</p>
+                <p class="text-sm mt-2">Після підтвердження цей подарунок буде видалено зі списку доступних.</p>
+            `;
+            const actions = `
+                <button onclick="window.app.confirmBought()" class="w-full px-4 py-3 bg-emerald-600 text-white font-bold rounded-lg hover:bg-emerald-700 transition duration-150">
+                    Позначити як "Куплено"
+                </button>
+                <button onclick="window.app.closeModal()" class="w-full px-4 py-3 bg-gray-200 text-gray-700 font-medium rounded-lg hover:bg-gray-300 transition duration-150">
+                    Скасувати
+                </button>
+            `;
+            openModal('Підтвердження покупки', content, actions, gift);
+        };
+
+        window.app.confirmBought = async () => {
+            if (!currentModalGift) return;
+            await handleConfirmBought(currentModalGift.id);
+            window.app.closeModal();
+        };
+
+        // --- Main Render Function ---
+
+        const renderApp = () => {
+            const appDiv = document.getElementById('app');
+            let htmlContent = '';
+
+            // Stop listener if not in a room view
+            if (currentView !== 'roomView' && currentView !== 'roomLink' && unsubscribeRoomListener) {
+                unsubscribeRoomListener();
+                unsubscribeRoomListener = null;
+                roomData = null;
+            }
+
+            // Start listener if we just entered a room view
+            if ((currentView === 'roomView' || currentView === 'roomLink') && currentRoomId && !roomData) {
+                 // Initial load, start listener
+                startRoomListener(currentRoomId);
+            }
+
+            switch (currentView) {
+                case 'landing':
+                    htmlContent = renderLanding();
+                    break;
+                case 'createRoom':
+                case 'addGifts':
+                    htmlContent = renderCreateRoom();
+                    break;
+                case 'roomLink':
+                    htmlContent = renderRoomLink();
+                    break;
+                case 'guestLogin':
+                    htmlContent = renderGuestLogin();
+                    break;
+                case 'roomView':
+                    if (roomData) {
+                        htmlContent = renderRoomView();
+                    } else if (currentRoomId) {
+                         // Fallback while data loads (already starting listener)
+                         htmlContent = `<div class="p-8 text-center text-gray-500">Завантаження даних кімнати: ${currentRoomId}...</div>`;
+                    } else {
+                        // Should not happen
+                        htmlContent = renderLanding();
+                    }
+                    break;
+                default:
+                    htmlContent = renderLanding();
+                    break;
+            }
+
+            appDiv.innerHTML = htmlContent;
+        };
+
+        // --- Initialization on Window Load ---
+
+        window.onload = async () => {
+            window.app = {
+                navigate,
+                handleJoinRoom: window.app.handleJoinRoom,
+                startAddingGifts: window.app.startAddingGifts,
+                updateDraftGift: window.app.updateDraftGift,
+                finalizeRoomCreation: window.app.finalizeRoomCreation,
+                copyLink: window.app.copyLink,
+                viewRoomAsOwner: window.app.viewRoomAsOwner,
+                loginAsGuest: window.app.loginAsGuest,
+                openReserveModal: window.app.openReserveModal,
+                confirmReserve: window.app.confirmReserve,
+                openCancelReservationModal: window.app.openCancelReservationModal,
+                confirmCancelReservation: window.app.confirmCancelReservation,
+                openConfirmBoughtModal: window.app.openConfirmBoughtModal,
+                confirmBought: window.app.confirmBought,
+                closeModal: window.app.closeModal,
+            };
+            await initFirebase();
+            handleInitialRoute();
+        };
+
+    </script>
+</body>
+</html>
+
